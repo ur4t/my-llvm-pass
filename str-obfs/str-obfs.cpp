@@ -27,14 +27,20 @@
 
 using namespace llvm;
 
-static cl::opt<unsigned int>
-    USER_SEED("seed", cl::desc("Use a seed to generate encryption key"),
-              cl::value_desc("non-zero unsigned int"));
-
-static cl::opt<bool> USE_OBFS_XOR("obfs-xor", cl::init(false),
-                                  cl::desc("Use xor instead of caesar"));
-
 namespace {
+
+cl::opt<unsigned> USER_SEED("seed", cl::init(0),
+                            cl::desc("Use a seed to generate encryption key"),
+                            cl::value_desc("non-zero unsigned int"));
+
+enum {
+  OBFS_CAESAR = 0,
+  OBFS_XOR = 1,
+};
+
+cl::opt<int>
+    OBFS_ALGO("obfs-algo", cl::init(OBFS_CAESAR),
+              cl::desc("Algo to use:\n 0 - Caesar (default)\n 1 - Xor"));
 
 struct EncodedVariable {
   GlobalVariable *gv;
@@ -216,10 +222,13 @@ struct ObfsCaesar : ObfsAlgo<ObfsCaesar> {
 };
 
 bool runPass(Module &mod) {
-  if (USE_OBFS_XOR) {
-    appendToGlobalCtors(mod, ObfsXor(mod).decode_stub, 0);
-  } else {
+  switch (OBFS_ALGO) {
+  case OBFS_CAESAR:
     appendToGlobalCtors(mod, ObfsCaesar(mod).decode_stub, 0);
+    break;
+  case OBFS_XOR:
+    appendToGlobalCtors(mod, ObfsXor(mod).decode_stub, 0);
+    break;
   }
   return false;
 };
