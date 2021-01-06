@@ -17,6 +17,7 @@
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
+#include <random>
 #include <vector>
 
 #include "PluginVersion.h"
@@ -26,12 +27,12 @@
 
 using namespace llvm;
 
-static cl::opt<int> INIT_KEY("init-key", cl::init(1), cl::desc("init key"),
-                             cl::value_desc("int"));
+static cl::opt<unsigned int>
+    USER_SEED("seed", cl::desc("Use a seed to generate encryption key"),
+              cl::value_desc("non-zero unsigned int"));
 
 static cl::opt<bool> USE_OBFS_XOR("obfs-xor", cl::init(false),
-                                  cl::desc("Use xor instead of caesar"),
-                                  cl::value_desc("Use xor instead of caesar"));
+                                  cl::desc("Use xor instead of caesar"));
 
 namespace {
 
@@ -56,15 +57,16 @@ template <typename ExtendType> struct ObfsAlgo {
   }
 
   explicit ObfsAlgo(Module &mod) {
-    auto encode_key = char(INIT_KEY);
+    std::random_device random_device;
+    std::mt19937 engine(USER_SEED != 0 ? USER_SEED : random_device());
+    std::uniform_int_distribution<unsigned char> distribution;
     auto &ctx = mod.getContext();
 
     //////////////////////////////////////////////////////////////////////////////
 
     // Encode all global strings
     for (auto &gv : mod.globals()) {
-      // TODO: rust uses constant structs to store string literials, which
-      // cannot be handled in this way
+      auto key = char(distribution(engine));
 
       // Ignore external globals & uninitialized globals.
       if (!(gv.hasInitializer() && !gv.hasExternalLinkage()
@@ -83,6 +85,9 @@ template <typename ExtendType> struct ObfsAlgo {
 
       Constant *initializer = gv.getInitializer();
 
+      // Only support byte string
+      // TODO: wide string support (wide char)
+      // TODO: rust string support (constant struct)
       if (isa<ConstantDataArray>(initializer)) {
         auto *cda = cast<ConstantDataArray>(initializer);
         if (!cda->isString()) {
@@ -91,10 +96,9 @@ template <typename ExtendType> struct ObfsAlgo {
 
         // Override the constant with a new constant.
         gv.setInitializer(ConstantDataArray::getString(
-            ctx, getEncodedString(cda->getAsString(), encode_key), false));
+            ctx, getEncodedString(cda->getAsString(), key), false));
 
-        EncodedVariables.emplace_back(&gv, encode_key);
-        ExtendType::mutateKey(encode_key);
+        EncodedVariables.emplace_back(&gv, key);
         gv.setConstant(false);
       }
     }
@@ -115,7 +119,7 @@ template <typename ExtendType> struct ObfsAlgo {
 
     // Name DecodeFunc arguments
     auto *string_ptr = decoder->getArg(0);
-    auto *decode_key = decoder->getArg(1);
+    auto *key = decoder->getArg(1);
 
     // Create blocks
     auto *entry = BasicBlock::Create(ctx, "entry", decoder);
@@ -141,7 +145,7 @@ template <typename ExtendType> struct ObfsAlgo {
     auto *encoded_byte_ptr =
         builder.CreatePHI(Type::getInt8PtrTy(ctx, 8), 2, "encoded-byte-ptr");
 
-    auto *decoded_byte = ExtendType::decoder(builder, encoded_byte, decode_key);
+    auto *decoded_byte = ExtendType::decoder(builder, encoded_byte, key);
     builder.CreateStore(decoded_byte, encoded_byte_ptr);
 
     auto *next_encoded_byte_ptr = builder.CreateGEP(
@@ -192,8 +196,6 @@ template <typename ExtendType> struct ObfsAlgo {
 };
 
 struct ObfsXor : ObfsAlgo<ObfsXor> {
-  static char mutateKey(char &key) { return key++; }
-
   static char encoder(char a, char b) { return char(a ^ b); }
 
   static Value *decoder(IRBuilder<> &builder, Value *encoded_byte, Value *key) {
@@ -204,8 +206,6 @@ struct ObfsXor : ObfsAlgo<ObfsXor> {
 };
 
 struct ObfsCaesar : ObfsAlgo<ObfsCaesar> {
-  static char mutateKey(char &key) { return key++; }
-
   static char encoder(char a, char b) { return char(a + b); }
 
   static Value *decoder(IRBuilder<> &builder, Value *encoded_byte, Value *key) {
