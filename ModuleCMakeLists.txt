@@ -1,0 +1,11 @@
+string(REGEX REPLACE ".*/\(.*\)" "\\1" CURRENT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_llvm_pass_plugin(
+        ${CURRENT_SOURCE_DIR}
+        MODULE
+        ${CURRENT_SOURCE_DIR}.cpp
+        # DEPENDS
+        # intrinsics_gen
+        # PLUGIN_TOOL
+        # opt
+        )

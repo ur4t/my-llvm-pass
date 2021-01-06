@@ -1,0 +1,5 @@
+Checks:          'clang-diagnostic-*,cert-*,performance-*,bugprone-*,modernize-*,readability-*,google-default-arguments,google-explicit-constructor,-modernize-use-trailing-return-type,-readability-magic-numbers'
+WarningsAsErrors: ''
+HeaderFilterRegex: ''
+AnalyzeTemporaryDtors: false
+FormatStyle:     none

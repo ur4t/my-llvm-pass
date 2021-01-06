@@ -1,0 +1,21 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug",
+            "program": "opt",
+            "args": [
+                "-disable-output",
+                "-load-pass-plugin=${workspaceFolder}/build/dummy_counter/dummy_counter.so",
+                "-passes=dummy-counter",
+                "${workspaceFolder}/test/a.ll",
+            ],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

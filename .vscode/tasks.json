@@ -1,0 +1,46 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "CMake - Unix Makefiles",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "-DCMAKE_BUILD_TYPE=Debug",
+                "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+                "-Bbuild",
+                "-G'Unix Makefiles'",
+            ],
+            "problemMatcher": [],
+            "group": "build"
+        },
+        {
+            "label": "Make build all",
+            "type": "shell",
+            "command": "make",
+            "options": {
+                "cwd": "${workspaceFolder}/build"
+            },
+            "args": [
+                "-j10",
+            ],
+            "problemMatcher": [],
+            "group": "build"
+        },
+        {
+            "label": "Make clean",
+            "type": "shell",
+            "command": "make",
+            "options": {
+                "cwd": "${workspaceFolder}/build"
+            },
+            "args": [
+                "clean",
+            ],
+            "problemMatcher": [],
+            "group": "build"
+        },
+    ]
+}
