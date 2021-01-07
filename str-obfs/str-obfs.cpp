@@ -243,18 +243,18 @@ bool runPass(Module &mod) {
 };
 
 // legacy pass for clang
-struct LegacyByteCaesarPass : public ModulePass {
+struct LegacyStrObfsPass : public ModulePass {
   static char ID;
-  LegacyByteCaesarPass() : ModulePass(ID) {}
+  LegacyStrObfsPass() : ModulePass(ID) {}
   bool runOnModule(Module &M) override { return runPass(M); }
 };
 
-char LegacyByteCaesarPass::ID = 0;
-RegisterPass<LegacyByteCaesarPass> X(PLUGIN_NAME, PLUGIN_NAME,
+char LegacyStrObfsPass::ID = 0;
+RegisterPass<LegacyStrObfsPass> X(PLUGIN_NAME, PLUGIN_NAME,
                                      false /* Only looks at CFG */,
                                      false /* Analysis Pass */);
 
-struct ByteCaesarPass : public PassInfoMixin<ByteCaesarPass> {
+struct StrObfsPass : public PassInfoMixin<StrObfsPass> {
   static PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM) {
     if (!runPass(M)) {
       return PreservedAnalyses::all();
@@ -265,17 +265,17 @@ struct ByteCaesarPass : public PassInfoMixin<ByteCaesarPass> {
 } // end anonymous namespace
 
 static llvm::RegisterStandardPasses
-    RegisterByteCaesarPass(llvm::PassManagerBuilder::EP_ModuleOptimizerEarly,
+    RegisterStrObfsPass(llvm::PassManagerBuilder::EP_ModuleOptimizerEarly,
                            [](const llvm::PassManagerBuilder &Builder,
                               llvm::legacy::PassManagerBase &PM) {
-                             PM.add(new LegacyByteCaesarPass());
+                             PM.add(new LegacyStrObfsPass());
                            });
 
 static llvm::RegisterStandardPasses
-    RegisterOpt0ByteCaesarPass(llvm::PassManagerBuilder::EP_EnabledOnOptLevel0,
+    RegisterOpt0StrObfsPass(llvm::PassManagerBuilder::EP_EnabledOnOptLevel0,
                                [](const llvm::PassManagerBuilder &Builder,
                                   llvm::legacy::PassManagerBase &PM) {
-                                 PM.add(new LegacyByteCaesarPass());
+                                 PM.add(new LegacyStrObfsPass());
                                });
 
 extern "C" llvm::PassPluginLibraryInfo LLVM_ATTRIBUTE_WEAK
@@ -286,7 +286,7 @@ llvmGetPassPluginInfo() {
                 [](StringRef Name, ModulePassManager &MPM,
                    ArrayRef<PassBuilder::PipelineElement> ArrayRef) {
                   if (Name == PLUGIN_NAME) {
-                    MPM.addPass(ByteCaesarPass());
+                    MPM.addPass(StrObfsPass());
                     return true;
                   }
                   return false;
