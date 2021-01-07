@@ -1,4 +1,4 @@
-Checks:          'clang-diagnostic-*,cert-*,performance-*,bugprone-*,modernize-*,readability-*,google-default-arguments,google-explicit-constructor,-modernize-use-trailing-return-type,-readability-magic-numbers'
+Checks:          'bugprone-*,cert-*,clang-diagnostic-*,llvm-*,performance-*,modernize-*,misc-*,readability-*,google-default-arguments,google-explicit-constructor,-modernize-use-trailing-return-type,-misc-non-private-member-variables-in-classes,-readability-magic-numbers'
 WarningsAsErrors: ''
 HeaderFilterRegex: ''
 AnalyzeTemporaryDtors: false

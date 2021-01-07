@@ -251,11 +251,11 @@ struct LegacyStrObfsPass : public ModulePass {
 
 char LegacyStrObfsPass::ID = 0;
 RegisterPass<LegacyStrObfsPass> X(PLUGIN_NAME, PLUGIN_NAME,
-                                     false /* Only looks at CFG */,
-                                     false /* Analysis Pass */);
+                                  false /* Only looks at CFG */,
+                                  false /* Analysis Pass */);
 
 struct StrObfsPass : public PassInfoMixin<StrObfsPass> {
-  static PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM) {
+  static PreservedAnalyses run(Module &M, ModuleAnalysisManager & /*MAM*/) {
     if (!runPass(M)) {
       return PreservedAnalyses::all();
     }
@@ -264,19 +264,15 @@ struct StrObfsPass : public PassInfoMixin<StrObfsPass> {
 };
 } // end anonymous namespace
 
-static llvm::RegisterStandardPasses
-    RegisterStrObfsPass(llvm::PassManagerBuilder::EP_ModuleOptimizerEarly,
-                           [](const llvm::PassManagerBuilder &Builder,
-                              llvm::legacy::PassManagerBase &PM) {
-                             PM.add(new LegacyStrObfsPass());
-                           });
+static llvm::RegisterStandardPasses RegisterStrObfsPass(
+    llvm::PassManagerBuilder::EP_ModuleOptimizerEarly,
+    [](const llvm::PassManagerBuilder & /*Builder*/,
+       llvm::legacy::PassManagerBase &PM) { PM.add(new LegacyStrObfsPass()); });
 
-static llvm::RegisterStandardPasses
-    RegisterOpt0StrObfsPass(llvm::PassManagerBuilder::EP_EnabledOnOptLevel0,
-                               [](const llvm::PassManagerBuilder &Builder,
-                                  llvm::legacy::PassManagerBase &PM) {
-                                 PM.add(new LegacyStrObfsPass());
-                               });
+static llvm::RegisterStandardPasses RegisterOpt0StrObfsPass(
+    llvm::PassManagerBuilder::EP_EnabledOnOptLevel0,
+    [](const llvm::PassManagerBuilder & /*Builder*/,
+       llvm::legacy::PassManagerBase &PM) { PM.add(new LegacyStrObfsPass()); });
 
 extern "C" llvm::PassPluginLibraryInfo LLVM_ATTRIBUTE_WEAK
 llvmGetPassPluginInfo() {
@@ -284,7 +280,7 @@ llvmGetPassPluginInfo() {
           [](PassBuilder &PB) {
             PB.registerPipelineParsingCallback(
                 [](StringRef Name, ModulePassManager &MPM,
-                   ArrayRef<PassBuilder::PipelineElement> ArrayRef) {
+                   ArrayRef<PassBuilder::PipelineElement> /*ArrayRef*/) {
                   if (Name == PLUGIN_NAME) {
                     MPM.addPass(StrObfsPass());
                     return true;
