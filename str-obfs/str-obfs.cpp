@@ -1,3 +1,4 @@
+#include "llvm/ADT/StringRef.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -17,6 +18,7 @@
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
+#include <cstddef>
 #include <random>
 #include <vector>
 
@@ -45,15 +47,17 @@ cl::opt<int>
 struct EncodedVariable {
   GlobalVariable *gv;
   char key;
-  EncodedVariable(GlobalVariable *gv, char key) : gv(gv), key(key) {}
+  size_t size;
+  EncodedVariable(GlobalVariable *gv, char key, size_t size)
+      : gv(gv), key(key), size(size) {}
 };
 
 template <typename ExtendType> struct ObfsAlgo {
-  Function *decode_stub = nullptr;
-  std::vector<EncodedVariable> EncodedVariables;
+  Function *decode_start = nullptr;
+  std::vector<EncodedVariable> encoded_variables;
 
   static StringRef getEncodedString(const StringRef &str, char key) {
-    auto size = str.size();
+    const auto size = str.size();
     const auto *data = str.begin();
     auto *encoded = new char[size];
     for (auto i = 0; i < size; ++i) {
@@ -75,36 +79,50 @@ template <typename ExtendType> struct ObfsAlgo {
       auto key = char(distribution(engine));
 
       // Ignore external globals & uninitialized globals.
-      if (!(gv.hasInitializer() && !gv.hasExternalLinkage()
-            // &&
-            // gv.getName().str().substr(0, 4) == ".str" && gv.isConstant() &&
-            // isa<ConstantDataSequential>(gv.getInitializer()) &&
-            // gv.getSection() != "llvm.metadata" &&
-            // gv.getSection().find("__objc_methname") == std::string::npos &&
-            // gv.getType()
-            //     ->getArrayElementType()
-            //     ->getArrayElementType()
-            //     ->isIntegerTy()
-            )) {
+      if (!(gv.hasInitializer() && !gv.hasExternalLinkage() &&
+            gv.getSection() != ".debug_gdb_scripts")) {
         continue;
       }
 
       Constant *initializer = gv.getInitializer();
 
-      // Only support byte string
-      // TODO: wide string support (wide char)
-      // TODO: rust string support (constant struct)
+      // Only support byte string, wide string support is platform dependent
       if (isa<ConstantDataArray>(initializer)) {
         auto *cda = cast<ConstantDataArray>(initializer);
-        if (!cda->isString()) {
+        if (cda == nullptr || !cda->isString()) {
           continue;
         }
 
-        // Override the constant with a new constant.
-        gv.setInitializer(ConstantDataArray::getString(
-            ctx, getEncodedString(cda->getAsString(), key), false));
+        auto encoded_str = getEncodedString(cda->getAsString(), key);
 
-        EncodedVariables.emplace_back(&gv, key);
+        // Override the constant with a new constant.
+        gv.setInitializer(
+            ConstantDataArray::getString(ctx, encoded_str, false));
+
+        encoded_variables.emplace_back(&gv, key, encoded_str.size());
+        gv.setConstant(false);
+      }
+
+      // Rust strings are constant structs:
+      // - with only 1 operand.
+      // - without trailing null byte.
+      if (isa<ConstantStruct>(initializer)) {
+        auto *cs = cast<ConstantStruct>(initializer);
+        if (cs->getNumOperands() > 1) {
+          continue;
+        }
+
+        auto *cda = cast<ConstantDataArray>(cs->getOperand(0));
+        if (cda == nullptr || !cda->isString()) {
+          continue;
+        }
+
+        auto encoded_str = getEncodedString(cda->getAsString(), key);
+
+        cs->setOperand(0,
+                       ConstantDataArray::getString(ctx, encoded_str, false));
+
+        encoded_variables.emplace_back(&gv, key, encoded_str.size());
         gv.setConstant(false);
       }
     }
@@ -112,64 +130,53 @@ template <typename ExtendType> struct ObfsAlgo {
     //////////////////////////////////////////////////////////////////////////////
 
     // Add Decode function
-    auto *decoder = cast<Function>(
+    auto *decode_handle = cast<Function>(
         mod.getOrInsertFunction(
-               /*Name=*/"decoder",
+               /*Name=*/"__dec_handle." + std::to_string(distribution(engine)),
                FunctionType::get(
                    /*Result=*/Type::getVoidTy(ctx),
                    /*Params=*/
-                   {Type::getInt8PtrTy(ctx, 8), Type::getInt8Ty(ctx)},
+                   {Type::getInt8PtrTy(ctx, 8), Type::getInt8Ty(ctx),
+                    Type::getInt64Ty(ctx)},
                    /*isVarArg=*/false))
             .getCallee());
-    decoder->setCallingConv(CallingConv::C);
+    decode_handle->setCallingConv(CallingConv::C);
 
-    // Name DecodeFunc arguments
-    auto *string_ptr = decoder->getArg(0);
-    auto *key = decoder->getArg(1);
+    // Name arguments
+    auto *string_ptr = decode_handle->getArg(0);
+    auto *key = decode_handle->getArg(1);
+    auto *size = decode_handle->getArg(2);
 
     // Create blocks
-    auto *entry = BasicBlock::Create(ctx, "entry", decoder);
-    auto *loop = BasicBlock::Create(ctx, "loop", decoder);
-    auto *end = BasicBlock::Create(ctx, "end", decoder);
+    auto *entry = BasicBlock::Create(ctx, "entry", decode_handle);
+    auto *loop = BasicBlock::Create(ctx, "loop", decode_handle);
+    auto *end = BasicBlock::Create(ctx, "end", decode_handle);
 
     // Entry block
     IRBuilder<> builder(entry);
-    auto *entry_encoded_byte =
-        builder.CreateLoad(string_ptr, "entry-encoded-byte");
-
-    // It will always points to a valid encoded string, so no need for cond.
+    auto *entry_encoded_byte = builder.CreateLoad(string_ptr);
+    auto *entry_counter =
+        builder.CreateSub(size, ConstantInt::get(IntegerType::get(ctx, 64), 1));
     builder.CreateBr(loop);
-    // auto *isEntryEncodedByteNULL = builder.CreateICmpEQ(
-    //     entryEncodedByte, Constant::getNullValue(Type::getInt8Ty(Ctx)),
-    //     "cmp1");
-    // builder.CreateCondBr(isEntryEncodedByteNULL, end, loop);
 
-    // Decryption loop
+    // Decoding loop
     builder.SetInsertPoint(loop);
-    auto *encoded_byte =
-        builder.CreatePHI(Type::getInt8Ty(ctx), 2, "encoded-byte");
-    auto *encoded_byte_ptr =
-        builder.CreatePHI(Type::getInt8PtrTy(ctx, 8), 2, "encoded-byte-ptr");
+    auto *counter = builder.CreatePHI(Type::getInt64Ty(ctx), 2);
+    auto *encoded_byte_ptr = builder.CreateGEP(string_ptr, counter);
+    auto *encoded_byte = builder.CreateLoad(encoded_byte_ptr);
 
     auto *decoded_byte = ExtendType::decoder(builder, encoded_byte, key);
     builder.CreateStore(decoded_byte, encoded_byte_ptr);
 
-    auto *next_encoded_byte_ptr = builder.CreateGEP(
-        encoded_byte_ptr, ConstantInt::get(IntegerType::get(ctx, 64), 1),
-        "next-encoded-byte-ptr");
-    auto *next_encoded_byte =
-        builder.CreateLoad(next_encoded_byte_ptr, "next-encoded-byte");
+    auto *next_counter = builder.CreateSub(
+        counter, ConstantInt::get(IntegerType::get(ctx, 64), 1));
 
-    auto *is_decoded_byte_null = builder.CreateICmpEQ(
-        decoded_byte, ConstantInt::get(IntegerType::get(ctx, 8), 0),
-        "is-decoded-byte-null");
+    auto *is_counter_zero = builder.CreateICmpEQ(
+        counter, ConstantInt::get(IntegerType::get(ctx, 64), 0));
+    builder.CreateCondBr(is_counter_zero, end, loop);
 
-    builder.CreateCondBr(is_decoded_byte_null, end, loop);
-
-    encoded_byte->addIncoming(entry_encoded_byte, entry);
-    encoded_byte->addIncoming(next_encoded_byte, loop);
-    encoded_byte_ptr->addIncoming(string_ptr, entry);
-    encoded_byte_ptr->addIncoming(next_encoded_byte_ptr, loop);
+    counter->addIncoming(entry_counter, entry);
+    counter->addIncoming(next_counter, loop);
 
     // End block
     builder.SetInsertPoint(end);
@@ -177,25 +184,27 @@ template <typename ExtendType> struct ObfsAlgo {
 
     //////////////////////////////////////////////////////////////////////////////
 
-    // Add DecodeStub function
-    decode_stub = cast<Function>(
-        mod.getOrInsertFunction(/*Name=*/"decode_stub",
+    // Add decode_stub function
+    decode_start = cast<Function>(
+        mod.getOrInsertFunction(/*Name=*/"__dec_start." +
+                                    std::to_string(distribution(engine)),
                                 FunctionType::get(
                                     /*Result=*/Type::getVoidTy(ctx),
                                     /*Params=*/{},
                                     /*isVarArg=*/false))
             .getCallee());
-    decode_stub->setCallingConv(CallingConv::C);
+    decode_start->setCallingConv(CallingConv::C);
 
     // Create entry block
-    IRBuilder<> stub_builder(BasicBlock::Create(ctx, "entry", decode_stub));
+    IRBuilder<> stub_builder(BasicBlock::Create(ctx, "entry", decode_start));
 
     // Add calls to decode every encoded global
-    for (auto &var : EncodedVariables) {
+    for (auto &i : encoded_variables) {
       stub_builder.CreateCall(
-          decoder,
-          {stub_builder.CreatePointerCast(var.gv, Type::getInt8PtrTy(ctx, 8)),
-           ConstantInt::get(Type::getInt8Ty(ctx), var.key)});
+          decode_handle,
+          {stub_builder.CreatePointerCast(i.gv, Type::getInt8PtrTy(ctx, 8)),
+           ConstantInt::get(Type::getInt8Ty(ctx), i.key),
+           ConstantInt::get(Type::getInt64Ty(ctx), i.size)});
     }
     stub_builder.CreateRetVoid();
   }
@@ -224,10 +233,10 @@ struct ObfsCaesar : ObfsAlgo<ObfsCaesar> {
 bool runPass(Module &mod) {
   switch (OBFS_ALGO) {
   case OBFS_CAESAR:
-    appendToGlobalCtors(mod, ObfsCaesar(mod).decode_stub, 0);
+    appendToGlobalCtors(mod, ObfsCaesar(mod).decode_start, 0);
     break;
   case OBFS_XOR:
-    appendToGlobalCtors(mod, ObfsXor(mod).decode_stub, 0);
+    appendToGlobalCtors(mod, ObfsXor(mod).decode_start, 0);
     break;
   }
   return false;
