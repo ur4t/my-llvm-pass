@@ -52,7 +52,7 @@ struct EncodedVariable {
       : gv(gv), key(key), size(size) {}
 };
 
-template <typename ExtendType> struct ObfsAlgo {
+template <typename Algorithm> struct Cipher {
   Function *decode_start = nullptr;
   std::vector<EncodedVariable> encoded_variables;
 
@@ -61,12 +61,12 @@ template <typename ExtendType> struct ObfsAlgo {
     const auto *data = str.begin();
     auto *encoded = new char[size];
     for (auto i = 0; i < size; ++i) {
-      encoded[i] = ExtendType::encoder(data[i], key);
+      encoded[i] = Algorithm::encoder(data[i], key);
     }
     return {encoded, size};
   }
 
-  explicit ObfsAlgo(Module &mod) {
+  explicit Cipher(Module &mod) {
     std::random_device random_device;
     std::mt19937 engine(USER_SEED != 0 ? USER_SEED : random_device());
     std::uniform_int_distribution<unsigned char> distribution;
@@ -78,50 +78,48 @@ template <typename ExtendType> struct ObfsAlgo {
     for (auto &gv : mod.globals()) {
       auto key = char(distribution(engine));
 
-      // Ignore external globals & uninitialized globals.
-      if (!(gv.hasInitializer() && !gv.hasExternalLinkage() &&
-            gv.getSection() != ".debug_gdb_scripts")) {
+      // Ignore:
+      // - uninitialized globals,
+      // - external globals,
+      // - gdb script loaders.
+      if (!gv.hasInitializer() || gv.hasExternalLinkage() ||
+          gv.getSection() == ".debug_gdb_scripts") {
         continue;
       }
 
       Constant *initializer = gv.getInitializer();
 
-      // Only support byte string, wide string support is platform dependent
+      // Only support byte strings, wide string support is platform dependent
+      // A byte strings is a constant data array with trailing null byte.
       if (isa<ConstantDataArray>(initializer)) {
         auto *cda = cast<ConstantDataArray>(initializer);
-        if (cda == nullptr || !cda->isString()) {
+        if (!cda->isString()) {
           continue;
         }
 
         auto encoded_str = getEncodedString(cda->getAsString(), key);
-
-        // Override the constant with a new constant.
         gv.setInitializer(
             ConstantDataArray::getString(ctx, encoded_str, false));
-
         encoded_variables.emplace_back(&gv, key, encoded_str.size());
         gv.setConstant(false);
       }
 
-      // Rust strings are constant structs:
-      // - with only 1 operand.
-      // - without trailing null byte.
+      // Rust strings are constant structs with only 1 operand.
+      // The operand is a constant data array without trailing null byte.
       if (isa<ConstantStruct>(initializer)) {
         auto *cs = cast<ConstantStruct>(initializer);
-        if (cs->getNumOperands() > 1) {
+        if (cs->getNumOperands() > 1 ||
+            !isa<ConstantDataArray>(cs->getOperand(0))) {
           continue;
         }
-
         auto *cda = cast<ConstantDataArray>(cs->getOperand(0));
-        if (cda == nullptr || !cda->isString()) {
+        if (!cda->isString()) {
           continue;
         }
 
         auto encoded_str = getEncodedString(cda->getAsString(), key);
-
         cs->setOperand(0,
                        ConstantDataArray::getString(ctx, encoded_str, false));
-
         encoded_variables.emplace_back(&gv, key, encoded_str.size());
         gv.setConstant(false);
       }
@@ -140,7 +138,6 @@ template <typename ExtendType> struct ObfsAlgo {
                     Type::getInt64Ty(ctx)},
                    /*isVarArg=*/false))
             .getCallee());
-    decode_handle->setCallingConv(CallingConv::C);
 
     // Name arguments
     auto *string_ptr = decode_handle->getArg(0);
@@ -162,21 +159,19 @@ template <typename ExtendType> struct ObfsAlgo {
     // Decoding loop
     builder.SetInsertPoint(loop);
     auto *counter = builder.CreatePHI(Type::getInt64Ty(ctx), 2);
-    auto *encoded_byte_ptr = builder.CreateGEP(string_ptr, counter);
-    auto *encoded_byte = builder.CreateLoad(encoded_byte_ptr);
-
-    auto *decoded_byte = ExtendType::decoder(builder, encoded_byte, key);
-    builder.CreateStore(decoded_byte, encoded_byte_ptr);
-
     auto *next_counter = builder.CreateSub(
         counter, ConstantInt::get(IntegerType::get(ctx, 64), 1));
+    counter->addIncoming(entry_counter, entry);
+    counter->addIncoming(next_counter, loop);
+
+    auto *byte_ptr = builder.CreateGEP(string_ptr, counter);
+    auto *encoded_byte = builder.CreateLoad(byte_ptr);
+    auto *decoded_byte = Algorithm::decoder(builder, encoded_byte, key);
+    builder.CreateStore(decoded_byte, byte_ptr);
 
     auto *is_counter_zero = builder.CreateICmpEQ(
         counter, ConstantInt::get(IntegerType::get(ctx, 64), 0));
     builder.CreateCondBr(is_counter_zero, end, loop);
-
-    counter->addIncoming(entry_counter, entry);
-    counter->addIncoming(next_counter, loop);
 
     // End block
     builder.SetInsertPoint(end);
@@ -193,7 +188,6 @@ template <typename ExtendType> struct ObfsAlgo {
                                     /*Params=*/{},
                                     /*isVarArg=*/false))
             .getCallee());
-    decode_start->setCallingConv(CallingConv::C);
 
     // Create entry block
     IRBuilder<> stub_builder(BasicBlock::Create(ctx, "entry", decode_start));
@@ -210,33 +204,33 @@ template <typename ExtendType> struct ObfsAlgo {
   }
 };
 
-struct ObfsXor : ObfsAlgo<ObfsXor> {
+struct XorCipher : Cipher<XorCipher> {
   static char encoder(char a, char b) { return char(a ^ b); }
 
   static Value *decoder(IRBuilder<> &builder, Value *encoded_byte, Value *key) {
     return builder.CreateXor(encoded_byte, key, "xor");
   }
 
-  explicit ObfsXor(Module &M) : ObfsAlgo(M) {}
+  explicit XorCipher(Module &M) : Cipher(M) {}
 };
 
-struct ObfsCaesar : ObfsAlgo<ObfsCaesar> {
+struct CaesarCipher : Cipher<CaesarCipher> {
   static char encoder(char a, char b) { return char(a + b); }
 
   static Value *decoder(IRBuilder<> &builder, Value *encoded_byte, Value *key) {
     return builder.CreateSub(encoded_byte, key, "sub");
   }
 
-  explicit ObfsCaesar(Module &M) : ObfsAlgo(M) {}
+  explicit CaesarCipher(Module &M) : Cipher(M) {}
 };
 
 bool runPass(Module &mod) {
   switch (OBFS_ALGO) {
   case OBFS_CAESAR:
-    appendToGlobalCtors(mod, ObfsCaesar(mod).decode_start, 0);
+    appendToGlobalCtors(mod, CaesarCipher(mod).decode_start, 0);
     break;
   case OBFS_XOR:
-    appendToGlobalCtors(mod, ObfsXor(mod).decode_start, 0);
+    appendToGlobalCtors(mod, XorCipher(mod).decode_start, 0);
     break;
   }
   return false;
