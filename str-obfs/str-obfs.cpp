@@ -1,50 +1,35 @@
-#include "llvm/ADT/StringRef.h"
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/Constants.h"
-#include "llvm/IR/DerivedTypes.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/GlobalValue.h"
-#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/PassManager.h"
-#include "llvm/IR/Type.h"
-#include "llvm/IR/Value.h"
-#include "llvm/IR/ValueSymbolTable.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
-#include "llvm/Support/CommandLine.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
-#include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
-#include <cstddef>
 #include <random>
-#include <vector>
 
 #include "PluginVersion.h"
 
 #define PLUGIN_NAME "str-obfs"
 #define DEBUG_TYPE PLUGIN_NAME
 
-using namespace llvm;
-
 namespace {
+
+using namespace llvm;
 
 const unsigned int PASS_PRIORITY = 0;
 
-cl::opt<unsigned> USER_SEED("seed", cl::init(0),
-                            cl::desc("Use a seed to generate encryption key"),
-                            cl::value_desc("non-zero unsigned int"));
+cl::opt<unsigned> UserSeed("seed", cl::init(0),
+                           cl::desc("Use a seed to generate encryption key"),
+                           cl::value_desc("non-zero unsigned int"));
 
 enum {
-  OBFS_CAESAR = 0,
-  OBFS_XOR = 1,
+  CAESAR_CIPHER = 0,
+  XOR_CIPHER = 1,
 };
 
 cl::opt<int>
-    OBFS_ALGO("obfs-algo", cl::init(OBFS_CAESAR),
-              cl::desc("Algo to use:\n 0 - Caesar (default)\n 1 - Xor"));
+    CipherType("cipher-type", cl::init(CAESAR_CIPHER),
+               cl::desc("Algo to use:\n 0 - Caesar (default)\n 1 - Xor"));
 
 struct EncodedVariable {
   GlobalVariable *gv;
@@ -70,139 +55,134 @@ template <typename Algorithm> struct Cipher {
 
   explicit Cipher(Module &mod) {
     std::random_device random_device;
-    std::mt19937 engine(USER_SEED != 0 ? USER_SEED : random_device());
+    std::mt19937 engine(UserSeed != 0 ? UserSeed : random_device());
     std::uniform_int_distribution<unsigned char> distribution;
     auto &ctx = mod.getContext();
+    Function *decode_handle;
 
-    //////////////////////////////////////////////////////////////////////////////
+    { // Encode all global strings
+      for (auto &gv : mod.globals()) {
+        auto key = char(distribution(engine));
 
-    // Encode all global strings
-    for (auto &gv : mod.globals()) {
-      auto key = char(distribution(engine));
-
-      // Ignore:
-      // - uninitialized globals,
-      // - external globals,
-      // - gdb script loaders.
-      if (!gv.hasInitializer() || gv.hasExternalLinkage() ||
-          gv.getSection() == ".debug_gdb_scripts") {
-        continue;
-      }
-
-      Constant *initializer = gv.getInitializer();
-
-      // Only support byte strings, wide string support is platform dependent
-      // A byte strings is a constant data array with trailing null byte.
-      if (isa<ConstantDataArray>(initializer)) {
-        auto *cda = cast<ConstantDataArray>(initializer);
-        if (!cda->isString()) {
+        // Ignore:
+        // - uninitialized globals,
+        // - external globals,
+        // - gdb script loaders.
+        if (!gv.hasInitializer() || gv.hasExternalLinkage() ||
+            gv.getSection() == ".debug_gdb_scripts") {
           continue;
         }
 
-        auto encoded_str = getEncodedString(cda->getAsString(), key);
-        gv.setInitializer(
-            ConstantDataArray::getString(ctx, encoded_str, false));
-        encoded_variables.emplace_back(&gv, key, encoded_str.size());
-        gv.setConstant(false);
-      }
+        Constant *initializer = gv.getInitializer();
 
-      // Rust strings are constant structs with only 1 operand.
-      // The operand is a constant data array without trailing null byte.
-      if (isa<ConstantStruct>(initializer)) {
-        auto *cs = cast<ConstantStruct>(initializer);
-        if (cs->getNumOperands() > 1 ||
-            !isa<ConstantDataArray>(cs->getOperand(0))) {
-          continue;
-        }
-        auto *cda = cast<ConstantDataArray>(cs->getOperand(0));
-        if (!cda->isString()) {
-          continue;
+        // Only support byte strings, wide string support is platform dependent
+        // A byte strings is a constant data array with trailing null byte.
+        if (isa<ConstantDataArray>(initializer)) {
+          auto *cda = cast<ConstantDataArray>(initializer);
+          if (!cda->isString()) {
+            continue;
+          }
+
+          auto encoded_str = getEncodedString(cda->getAsString(), key);
+          gv.setInitializer(
+              ConstantDataArray::getString(ctx, encoded_str, false));
+          encoded_variables.emplace_back(&gv, key, encoded_str.size());
+          gv.setConstant(false);
         }
 
-        auto encoded_str = getEncodedString(cda->getAsString(), key);
-        cs->setOperand(0,
-                       ConstantDataArray::getString(ctx, encoded_str, false));
-        encoded_variables.emplace_back(&gv, key, encoded_str.size());
-        gv.setConstant(false);
+        // Rust strings are constant structs with only 1 operand.
+        // The operand is a constant data array without trailing null byte.
+        if (isa<ConstantStruct>(initializer)) {
+          auto *cs = cast<ConstantStruct>(initializer);
+          if (cs->getNumOperands() > 1 ||
+              !isa<ConstantDataArray>(cs->getOperand(0))) {
+            continue;
+          }
+          auto *cda = cast<ConstantDataArray>(cs->getOperand(0));
+          if (!cda->isString()) {
+            continue;
+          }
+
+          auto encoded_str = getEncodedString(cda->getAsString(), key);
+          cs->setOperand(0,
+                         ConstantDataArray::getString(ctx, encoded_str, false));
+          encoded_variables.emplace_back(&gv, key, encoded_str.size());
+          gv.setConstant(false);
+        }
       }
     }
 
-    //////////////////////////////////////////////////////////////////////////////
+    { // Add Decode function
+      decode_handle = cast<Function>(
+          mod.getOrInsertFunction(
+                 /*Name=*/"__dec_handle." +
+                     std::to_string(distribution(engine)),
+                 FunctionType::get(
+                     /*Result=*/Type::getVoidTy(ctx),
+                     /*Params=*/
+                     {Type::getInt8PtrTy(ctx), Type::getInt8Ty(ctx),
+                      Type::getInt64Ty(ctx)},
+                     /*isVarArg=*/false))
+              .getCallee());
 
-    // Add Decode function
-    auto *decode_handle = cast<Function>(
-        mod.getOrInsertFunction(
-               /*Name=*/"__dec_handle." + std::to_string(distribution(engine)),
-               FunctionType::get(
-                   /*Result=*/Type::getVoidTy(ctx),
-                   /*Params=*/
-                   {Type::getInt8PtrTy(ctx, 8), Type::getInt8Ty(ctx),
-                    Type::getInt64Ty(ctx)},
-                   /*isVarArg=*/false))
-            .getCallee());
+      // Name arguments
+      auto *string_ptr = decode_handle->getArg(0);
+      auto *key = decode_handle->getArg(1);
+      auto *size = decode_handle->getArg(2);
 
-    // Name arguments
-    auto *string_ptr = decode_handle->getArg(0);
-    auto *key = decode_handle->getArg(1);
-    auto *size = decode_handle->getArg(2);
+      // Create blocks
+      auto *entry = BasicBlock::Create(ctx, "entry", decode_handle);
+      auto *loop = BasicBlock::Create(ctx, "loop", decode_handle);
+      auto *end = BasicBlock::Create(ctx, "end", decode_handle);
 
-    // Create blocks
-    auto *entry = BasicBlock::Create(ctx, "entry", decode_handle);
-    auto *loop = BasicBlock::Create(ctx, "loop", decode_handle);
-    auto *end = BasicBlock::Create(ctx, "end", decode_handle);
+      // Entry block
+      IRBuilder<> irb(entry);
+      auto *entry_encoded_byte = irb.CreateLoad(string_ptr);
+      auto *entry_counter =
+          irb.CreateSub(size, ConstantInt::get(Type::getInt64Ty(ctx), 1));
+      irb.CreateBr(loop);
 
-    // Entry block
-    IRBuilder<> builder(entry);
-    auto *entry_encoded_byte = builder.CreateLoad(string_ptr);
-    auto *entry_counter =
-        builder.CreateSub(size, ConstantInt::get(IntegerType::get(ctx, 64), 1));
-    builder.CreateBr(loop);
+      // Decoding loop
+      irb.SetInsertPoint(loop);
+      auto *counter = irb.CreatePHI(Type::getInt64Ty(ctx), 2);
+      auto *next_counter =
+          irb.CreateSub(counter, ConstantInt::get(Type::getInt64Ty(ctx), 1));
+      counter->addIncoming(entry_counter, entry);
+      counter->addIncoming(next_counter, loop);
 
-    // Decoding loop
-    builder.SetInsertPoint(loop);
-    auto *counter = builder.CreatePHI(Type::getInt64Ty(ctx), 2);
-    auto *next_counter = builder.CreateSub(
-        counter, ConstantInt::get(IntegerType::get(ctx, 64), 1));
-    counter->addIncoming(entry_counter, entry);
-    counter->addIncoming(next_counter, loop);
+      auto *byte_ptr = irb.CreateGEP(string_ptr, counter);
+      auto *encoded_byte = irb.CreateLoad(byte_ptr);
+      auto *decoded_byte = Algorithm::decoder(irb, encoded_byte, key);
+      irb.CreateStore(decoded_byte, byte_ptr);
 
-    auto *byte_ptr = builder.CreateGEP(string_ptr, counter);
-    auto *encoded_byte = builder.CreateLoad(byte_ptr);
-    auto *decoded_byte = Algorithm::decoder(builder, encoded_byte, key);
-    builder.CreateStore(decoded_byte, byte_ptr);
+      auto *is_counter_zero =
+          irb.CreateICmpEQ(counter, ConstantInt::get(Type::getInt64Ty(ctx), 0));
+      irb.CreateCondBr(is_counter_zero, end, loop);
 
-    auto *is_counter_zero = builder.CreateICmpEQ(
-        counter, ConstantInt::get(IntegerType::get(ctx, 64), 0));
-    builder.CreateCondBr(is_counter_zero, end, loop);
-
-    // End block
-    builder.SetInsertPoint(end);
-    builder.CreateRetVoid();
-
-    //////////////////////////////////////////////////////////////////////////////
-
-    // Add decode_stub function
-    decode_start = cast<Function>(
-        mod.getOrInsertFunction(/*Name=*/"__dec_start." +
-                                    std::to_string(distribution(engine)),
-                                FunctionType::get(
-                                    /*Result=*/Type::getVoidTy(ctx),
-                                    /*Params=*/{},
-                                    /*isVarArg=*/false))
-            .getCallee());
-
-    // Create entry block
-    IRBuilder<> stub_builder(BasicBlock::Create(ctx, "entry", decode_start));
-
-    // Add calls to decode every encoded global
-    for (auto &i : encoded_variables) {
-      stub_builder.CreateCall(
-          decode_handle,
-          {stub_builder.CreatePointerCast(i.gv, Type::getInt8PtrTy(ctx, 8)),
-           ConstantInt::get(Type::getInt8Ty(ctx), i.key),
-           ConstantInt::get(Type::getInt64Ty(ctx), i.size)});
+      // End block
+      irb.SetInsertPoint(end);
+      irb.CreateRetVoid();
     }
-    stub_builder.CreateRetVoid();
+
+    { // Add decode_stub function
+      decode_start = cast<Function>(
+          mod.getOrInsertFunction(/*Name=*/"__dec_start." +
+                                      std::to_string(distribution(engine)),
+                                  FunctionType::get(
+                                      /*Result=*/Type::getVoidTy(ctx),
+                                      /*Params=*/{},
+                                      /*isVarArg=*/false))
+              .getCallee());
+
+      IRBuilder<> irb(BasicBlock::Create(ctx, "entry", decode_start));
+      for (auto &i : encoded_variables) {
+        irb.CreateCall(decode_handle,
+                       {irb.CreatePointerCast(i.gv, Type::getInt8PtrTy(ctx)),
+                        ConstantInt::get(Type::getInt8Ty(ctx), i.key),
+                        ConstantInt::get(Type::getInt64Ty(ctx), i.size)});
+      }
+      irb.CreateRetVoid();
+    }
   }
 };
 
@@ -227,11 +207,11 @@ struct CaesarCipher : Cipher<CaesarCipher> {
 };
 
 bool runPass(Module &mod) {
-  switch (OBFS_ALGO) {
-  case OBFS_CAESAR:
+  switch (CipherType) {
+  case CAESAR_CIPHER:
     appendToGlobalCtors(mod, CaesarCipher(mod).decode_start, PASS_PRIORITY);
     break;
-  case OBFS_XOR:
+  case XOR_CIPHER:
     appendToGlobalCtors(mod, XorCipher(mod).decode_start, PASS_PRIORITY);
     break;
   }
@@ -239,18 +219,18 @@ bool runPass(Module &mod) {
 };
 
 // legacy pass for clang
-struct LegacyStrObfsPass : public ModulePass {
+struct LegacyPass : public ModulePass {
   static char ID;
-  LegacyStrObfsPass() : ModulePass(ID) {}
+  LegacyPass() : ModulePass(ID) {}
   bool runOnModule(Module &M) override { return runPass(M); }
 };
 
-char LegacyStrObfsPass::ID = 0;
-RegisterPass<LegacyStrObfsPass> X(PLUGIN_NAME, PLUGIN_NAME,
-                                  false /* Only looks at CFG */,
-                                  false /* Analysis Pass */);
+char LegacyPass::ID = 0;
+RegisterPass<LegacyPass> X(PLUGIN_NAME, PLUGIN_NAME,
+                           false /* Only looks at CFG */,
+                           false /* Analysis Pass */);
 
-struct StrObfsPass : public PassInfoMixin<StrObfsPass> {
+struct NewPass : public PassInfoMixin<NewPass> {
   static PreservedAnalyses run(Module &M, ModuleAnalysisManager & /*MAM*/) {
     if (!runPass(M)) {
       return PreservedAnalyses::all();
@@ -258,17 +238,16 @@ struct StrObfsPass : public PassInfoMixin<StrObfsPass> {
     return PreservedAnalyses::none();
   };
 };
-} // end anonymous namespace
 
-static llvm::RegisterStandardPasses RegisterStrObfsPass(
+llvm::RegisterStandardPasses RegisterPass(
     llvm::PassManagerBuilder::EP_ModuleOptimizerEarly,
     [](const llvm::PassManagerBuilder & /*Builder*/,
-       llvm::legacy::PassManagerBase &PM) { PM.add(new LegacyStrObfsPass()); });
+       llvm::legacy::PassManagerBase &PM) { PM.add(new LegacyPass()); });
 
-static llvm::RegisterStandardPasses RegisterOpt0StrObfsPass(
+llvm::RegisterStandardPasses RegisterOpt0Pass(
     llvm::PassManagerBuilder::EP_EnabledOnOptLevel0,
     [](const llvm::PassManagerBuilder & /*Builder*/,
-       llvm::legacy::PassManagerBase &PM) { PM.add(new LegacyStrObfsPass()); });
+       llvm::legacy::PassManagerBase &PM) { PM.add(new LegacyPass()); });
 
 extern "C" llvm::PassPluginLibraryInfo LLVM_ATTRIBUTE_WEAK
 llvmGetPassPluginInfo() {
@@ -278,10 +257,12 @@ llvmGetPassPluginInfo() {
                 [](StringRef Name, ModulePassManager &MPM,
                    ArrayRef<PassBuilder::PipelineElement> /*ArrayRef*/) {
                   if (Name == PLUGIN_NAME) {
-                    MPM.addPass(StrObfsPass());
+                    MPM.addPass(NewPass());
                     return true;
                   }
                   return false;
                 });
           }};
 }
+
+} // end anonymous namespace
