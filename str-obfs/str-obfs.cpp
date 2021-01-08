@@ -31,6 +31,8 @@ using namespace llvm;
 
 namespace {
 
+const unsigned int PASS_PRIORITY = 0;
+
 cl::opt<unsigned> USER_SEED("seed", cl::init(0),
                             cl::desc("Use a seed to generate encryption key"),
                             cl::value_desc("non-zero unsigned int"));
@@ -227,10 +229,10 @@ struct CaesarCipher : Cipher<CaesarCipher> {
 bool runPass(Module &mod) {
   switch (OBFS_ALGO) {
   case OBFS_CAESAR:
-    appendToGlobalCtors(mod, CaesarCipher(mod).decode_start, 0);
+    appendToGlobalCtors(mod, CaesarCipher(mod).decode_start, PASS_PRIORITY);
     break;
   case OBFS_XOR:
-    appendToGlobalCtors(mod, XorCipher(mod).decode_start, 0);
+    appendToGlobalCtors(mod, XorCipher(mod).decode_start, PASS_PRIORITY);
     break;
   }
   return false;
