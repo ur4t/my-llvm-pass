@@ -18,6 +18,9 @@ using namespace llvm;
 
 const unsigned int PASS_PRIORITY = 0;
 
+cl::opt<bool, true> Debug("debug", cl::desc("Enable debug output"),
+                          cl::location(DebugFlag));
+
 cl::opt<unsigned> UserSeed("seed", cl::init(0),
                            cl::desc("Use a seed to generate encryption key"),
                            cl::value_desc("non-zero unsigned int"));
@@ -72,6 +75,8 @@ template <typename Algorithm> struct Cipher {
             gv.getSection() == ".debug_gdb_scripts") {
           continue;
         }
+
+        LLVM_DEBUG(dbgs() << gv << '\n');
 
         Constant *initializer = gv.getInitializer();
 
