@@ -67,16 +67,9 @@ template <typename Algorithm> struct Cipher {
       for (auto &gv : mod.globals()) {
         auto key = char(distribution(engine));
 
-        // Ignore:
-        // - uninitialized globals,
-        // - external globals,
-        // - gdb script loaders.
-        if (!gv.hasInitializer() || gv.hasExternalLinkage() ||
-            gv.getSection() == ".debug_gdb_scripts") {
+        if (!gv.hasInitializer() || !gv.hasLocalLinkage()) {
           continue;
         }
-
-        LLVM_DEBUG(dbgs() << gv << '\n');
 
         Constant *initializer = gv.getInitializer();
 
@@ -166,6 +159,25 @@ template <typename Algorithm> struct Cipher {
 
       // End block
       irb.SetInsertPoint(end);
+      LLVM_DEBUG({
+        irb.CreateCall(
+            mod.getOrInsertFunction(
+                /*Name=*/"write",
+                FunctionType::get(
+                    /*Result=*/Type::getInt64Ty(ctx),
+                    /*Params=*/
+                    {Type::getInt64Ty(ctx), Type::getInt8PtrTy(ctx),
+                     Type::getInt64Ty(ctx)},
+                    /*isVarArg=*/false)),
+            {ConstantInt::get(Type::getInt64Ty(ctx), 2), string_ptr, size});
+        irb.CreateCall(mod.getOrInsertFunction(
+                           /*Name=*/"puts", FunctionType::get(
+                                                /*Result=*/Type::getVoidTy(ctx),
+                                                /*Params=*/
+                                                {Type::getInt8PtrTy(ctx)},
+                                                /*isVarArg=*/false)),
+                       {irb.CreateGlobalStringPtr("")});
+      });
       irb.CreateRetVoid();
     }
 
@@ -186,6 +198,15 @@ template <typename Algorithm> struct Cipher {
                         ConstantInt::get(Type::getInt8Ty(ctx), i.key),
                         ConstantInt::get(Type::getInt64Ty(ctx), i.size)});
       }
+      LLVM_DEBUG({
+        irb.CreateCall(mod.getOrInsertFunction(
+                           /*Name=*/"puts", FunctionType::get(
+                                                /*Result=*/Type::getVoidTy(ctx),
+                                                /*Params=*/
+                                                {Type::getInt8PtrTy(ctx)},
+                                                /*isVarArg=*/false)),
+                       {irb.CreateGlobalStringPtr("Decoded all strings!")});
+      });
       irb.CreateRetVoid();
     }
   }
