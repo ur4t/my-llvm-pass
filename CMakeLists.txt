@@ -16,7 +16,7 @@ if(LLVM_INSTALL_DIR)
     list(APPEND CMAKE_PREFIX_PATH "${LLVM_INSTALL_DIR}/lib/cmake/llvm/")
 endif()
 
-find_package(LLVM 11 REQUIRED CONFIG)
+find_package(LLVM 10...11 REQUIRED CONFIG)
 
 dump_variables(
         LLVM_PACKAGE_VERSION

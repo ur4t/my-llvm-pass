@@ -150,7 +150,6 @@ Function *getCtor(Module &mod, Cipher &cipher) {
 
     // Entry block
     IRBuilder<> irb(entry);
-    auto *entry_encoded_byte = irb.CreateLoad(string_ptr);
     auto *entry_counter =
         irb.CreateSub(size, ConstantInt::get(Type::getInt64Ty(ctx), 1));
     irb.CreateBr(loop);
@@ -228,9 +227,9 @@ bool runPass(Module &mod) {
     cipher = Xor;
     break;
   }
-  appendToGlobalCtors(mod, getCtor(mod, Add), PASS_PRIORITY);
+  appendToGlobalCtors(mod, getCtor(mod, cipher), PASS_PRIORITY);
   return false;
-};
+}
 
 // legacy pass for clang
 struct LegacyPass : public ModulePass {
