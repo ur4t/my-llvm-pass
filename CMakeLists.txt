@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.17)
+cmake_minimum_required(VERSION 3.18)
 
 project(my-obfs
         VERSION "0.1.0"
@@ -16,7 +16,7 @@ if(LLVM_INSTALL_DIR)
     list(APPEND CMAKE_PREFIX_PATH "${LLVM_INSTALL_DIR}/lib/cmake/llvm/")
 endif()
 
-find_package(LLVM 10...11 REQUIRED CONFIG)
+find_package(LLVM REQUIRED CONFIG)
 
 dump_variables(
         LLVM_PACKAGE_VERSION
